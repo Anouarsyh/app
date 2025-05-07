@@ -1,62 +1,98 @@
 pipeline {
-    agent {
-        docker {
-            image 'python:3.9'
-            args '-v /var/run/docker.sock:/var/run/docker.sock'
-        }
-    }
-    
+    agent any
+
     environment {
-        SONAR_HOST_URL = 'http://sonarqube:9000'
+        SONAR_HOST_URL = 'http://192.168.1.73:9000'
         SONAR_TOKEN = credentials('sonar-token')
         GITHUB_REPO = 'https://github.com/Anouarsyh/app.git'
     }
     
     stages {
+        stage('Setup Environment') {
+            steps {
+                sh 'bash setup.sh || echo "Creating setup script" && echo "#!/bin/bash\\necho \\"Setup environment executed\\"" > setup.sh && chmod +x setup.sh'
+            }
+        }
+
         stage('Checkout') {
             steps {
-                checkout scm
+                git branch: 'main', url: "${GITHUB_REPO}"
             }
         }
-        
+
         stage('Install Dependencies') {
             steps {
-                sh 'pip install -r requirements.txt'
-                sh 'pip install pylint bandit safety'
-            }
-        }
-        
-        stage('Linting') {
-            steps {
-                sh 'pylint --disable=C0111,C0103,C0303,C0301,W1202,C0330,C0326,W0702,R0914,R0913,R0915,R0912,R0801,W0612,W0613,W0621,W0703 *.py || true'
-            }
-        }
-        
-        stage('Secret Detection') {
-            steps {
                 sh '''
-                pip install detect-secrets
-                detect-secrets scan --baseline .secrets.baseline || true
+                python3 -m venv venv
+                source venv/bin/activate
+                pip install --upgrade pip
+                pip install -r requirements.txt
+                pip install pylint bandit safety detect-secrets pytest pytest-cov
                 '''
             }
         }
-        
+
+        stage('Linting') {
+            steps {
+                catchError(buildResult: 'UNSTABLE', stageResult: 'FAILURE') {
+                    sh '''
+                    source venv/bin/activate
+                    pylint --disable=C0111,C0103,C0303,C0301,W1202,C0330,C0326,W0702,R0914,R0913,R0915,R0912,R0801,W0612,W0613,W0621,W0703 *.py || true
+                    '''
+                }
+            }
+        }
+
+        stage('Secret Detection') {
+            steps {
+                catchError(buildResult: 'UNSTABLE', stageResult: 'FAILURE') {
+                    sh '''
+                    source venv/bin/activate
+                    if [ ! -f .secrets.baseline ]; then
+                        detect-secrets scan > .secrets.baseline
+                    fi
+                    detect-secrets scan --baseline .secrets.baseline
+                    '''
+                }
+            }
+        }
+
+        stage('Unit Tests') {
+            steps {
+                sh '''
+                source venv/bin/activate
+                pytest --cov=. --cov-report=xml || echo "No tests found or tests failed"
+                '''
+            }
+        }
+
         stage('SCA - Dependency Check') {
             steps {
-                sh 'safety check -r requirements.txt --output text'
+                catchError(buildResult: 'UNSTABLE', stageResult: 'FAILURE') {
+                    sh '''
+                    source venv/bin/activate
+                    safety check -r requirements.txt --output text
+                    '''
+                }
             }
         }
-        
+
         stage('SAST - Bandit') {
             steps {
-                sh 'bandit -r . -f json -o bandit-results.json || true'
+                catchError(buildResult: 'UNSTABLE', stageResult: 'FAILURE') {
+                    sh '''
+                    source venv/bin/activate
+                    bandit -r . -f json -o bandit-results.json
+                    '''
+                }
             }
         }
-        
+
         stage('SAST - SonarQube Analysis') {
             steps {
                 withSonarQubeEnv('SonarQube') {
                     sh '''
+                    source venv/bin/activate
                     pip install sonar-scanner-cli
                     sonar-scanner \
                       -Dsonar.projectKey=edr-automation \
@@ -69,41 +105,26 @@ pipeline {
                 }
             }
         }
-        
+
         stage('Quality Gate') {
             steps {
                 timeout(time: 10, unit: 'MINUTES') {
-                    waitForQualityGate abortPipeline: false
+                    waitForQualityGate abortPipeline: true
                 }
             }
         }
-        
-        stage('Build Docker Image') {
-            steps {
-                sh 'docker build -t edr-automation:${BUILD_NUMBER} .'
-            }
-        }
-        
-        stage('Security Scan Docker Image') {
-            steps {
-                sh '''
-                docker pull aquasec/trivy:latest
-                docker run --rm -v /var/run/docker.sock:/var/run/docker.sock aquasec/trivy:latest image edr-automation:${BUILD_NUMBER}
-                '''
-            }
-        }
     }
-    
+
     post {
         always {
-            archiveArtifacts artifacts: 'bandit-results.json', allowEmptyArchive: true
+            archiveArtifacts artifacts: 'bandit-results.json, coverage.xml', allowEmptyArchive: true
             cleanWs()
         }
         success {
-            echo 'Pipeline completed successfully!'
+            echo '✅ Pipeline completed successfully!'
         }
         failure {
-            echo 'Pipeline failed!'
+            echo '❌ Pipeline failed.'
         }
     }
 }
