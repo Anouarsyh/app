@@ -6,6 +6,9 @@ import os
 import matplotlib.pyplot as plt
 from datetime import datetime, timedelta
 import time
+import smtplib
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
 
 # Configuration de la page Streamlit
 st.set_page_config(page_title="EDR Chatbot Automation", layout="wide")
@@ -65,8 +68,9 @@ def get_online_machines(file_path):
 
 
 # Fonction pour récupérer les Malops
-def get_malops(config):
-    print("Starting Malops retrieval...")
+# Fonction modifiée pour récupérer les Malops avec filtres
+def get_malops(config, severity_filter=None, status_filter=None, priority_filter=None):
+    print("Starting Malops retrieval with filters...")
     # Login information
     username = config["username"]
     password = config["password"]
@@ -98,11 +102,30 @@ def get_malops(config):
 
     time_range_start = 0
     time_range_end = 164633936634499999
-    malop_state = ""
+    
+    # Build the filter based on parameters
+    filter_query = {"malop": {}}
+    
+    # Apply status filter
+    if status_filter and status_filter != "All":
+        filter_query["malop"]["status"] = [status_filter]
+    
+    # Apply severity filter
+    if severity_filter and len(severity_filter) > 0:
+        filter_query["malop"]["severity"] = severity_filter
+    
+    # Apply priority filter
+    if priority_filter and len(priority_filter) > 0:
+        filter_query["malop"]["priority"] = priority_filter
 
-    query = json.dumps({"search":{},"range":{"from":time_range_start,"to":time_range_end},"pagination":{"pageSize":100,"offset":0},"filter":{"malop":{"status":[malop_state]}}})
+    query = json.dumps({
+        "search": {},
+        "range": {"from": time_range_start, "to": time_range_end},
+        "pagination": {"pageSize": 100, "offset": 0},
+        "filter": filter_query
+    })
 
-    print(f"Sending request to {api_url}...")
+    print(f"Sending request to {api_url} with filters: {filter_query}")
     api_response = session.request("POST", api_url, data=query, headers=headers)
     
     if api_response.status_code == 200:
@@ -111,8 +134,6 @@ def get_malops(config):
     else:
         print(f"Error retrieving Malops: {api_response.status_code}")
         return None, session
-
-
 # Fonction pour analyser les malops
 def analyze_malops(malops_data):
     """Analyze malops to extract important information"""
@@ -427,17 +448,195 @@ def perform_remediation_action(session, action_type, target_name, target_id, mac
         return False, None
    
     
+#################################
+# 1. Ajouter cette fonction pour définir les règles
+
+def define_decision_rules():
+    """Définit les règles de décision basées sur NIST/SANS"""
+    rules = [
+        {
+            "name": "Ransomware Detection",
+            "conditions": lambda m: m.get("detectionType") == "Ransomware",
+            "actions": ["isolate"],
+            "description": "Isoler immédiatement la machine en cas de détection de ransomware"
+        },
+        {
+            "name": "Lateral Movement Observed",
+            "conditions": lambda m: "Lateral Movement" in m.get("mitreTactics", []),
+            "actions": ["notify", "monitor"],
+            "description": "Alerter et surveiller les mouvements latéraux"
+        },
+        {
+            "name": "Auto-Unisolate Remediated",
+            "conditions": lambda m: m.get("status") == "Remediated",
+            "machine_conditions": lambda machine: machine.get("isolated", False),
+            "actions": ["unisolate"],
+            "description": "Lever l'isolation automatiquement pour les machines remédiées"
+        }
+    ]
+    return rules
+
+
+# 3. Ajouter cette fonction pour envoyer des alertes (à implémenter selon vos besoins)
+
+# Ajouter la fonction pour envoyer des emails
+def send_email_notification(message):
+    """Envoie une notification par email pour les réponses automatiques"""
+    try:
+        # Configuration de l'email
+        sender_email = "anwarsayh98@gmail.com"  # À modifier
+        receiver_email = "anouar.sayah03@gmail.com"  # Le destinataire souhaité
+        password = "Anwar_2003@"  # À modifier
+        
+        # Créer le message
+        msg = MIMEMultipart()
+        msg['From'] = sender_email
+        msg['To'] = receiver_email
+        msg['Subject'] = "Alerte EDR - Réponse automatisée"
+        
+        # Ajouter du contenu
+        msg.attach(MIMEText(message, 'plain'))
+        
+        # Connexion au serveur et envoi
+        server = smtplib.SMTP('smtp.gmail.com', 587)
+        server.starttls()
+        server.login(sender_email, password)
+        server.send_message(msg)
+        server.quit()
+        
+        print(f"Email envoyé avec succès à {receiver_email}")
+        return True
+    except Exception as e:
+        print(f"Erreur lors de l'envoi de l'email: {str(e)}")
+        return False
+
+# Modifier la fonction d'alerte pour utiliser l'email
+def send_alert(message):
+    """Envoie une alerte par email"""
+    st.warning(message)
+    # Envoyer l'email
+    success = send_email_notification(message)
+    # Log le message dans tous les cas
+    print(f"ALERT: {message}")
+    return success
+##############################
+
+# Ajoutez cette fonction pour le mode automatique
+def execute_rule_automatically(rule, malop, machine, session):
+    """Exécute une règle en mode automatique sans confirmation utilisateur"""
+    rule_record = {
+        "rule_name": rule["name"],
+        "malop_id": malop.get("guid", "N/A"),
+        "malop_name": malop.get("displayName", "Unknown"),
+        "machine": machine.get("displayName", "Unknown"),
+        "actions": ", ".join(rule["actions"]),
+        "executed_at": datetime.now().strftime('%d/%m/%Y at %H:%M:%S'),
+        "status": "Initiated"
+    }
+    
+    action_results = []
+    
+    # Exécuter les actions recommandées
+    for action in rule["actions"]:
+        if action == "isolate":
+            success, response = isolate_machine(session, machine.get('guid', ''), malop.get('guid', ''))
+            action_results.append({"action": "isolate", "success": success})
+            
+        elif action == "unisolate":
+            success, response = unisolate_machine(session, machine.get('guid', ''), malop.get('guid', ''))
+            action_results.append({"action": "unisolate", "success": success})
+            
+        elif action == "kill_process":
+            success, response = perform_remediation_action(
+                session,
+                "KILL_PROCESS",
+                "malicious_process",
+                f"auto-kill-{int(time.time())}",
+                machine.get('displayName', 'Unknown'),
+                machine.get('guid', '')
+            )
+            action_results.append({"action": "kill_process", "success": success})
+            
+        elif action == "notify":
+            success = send_alert(f"🔔 Alerte automatique: {rule['name']} déclenché pour {machine.get('displayName', 'Unknown')}")
+            action_results.append({"action": "notify", "success": success})
+            
+        elif action == "monitor":
+            # Simuler une action de surveillance
+            success = True  # Toujours réussie pour l'instant
+            action_results.append({"action": "monitor", "success": success})
+    
+    # Mettre à jour le statut dans l'enregistrement
+    all_successful = all(result["success"] for result in action_results)
+    rule_record["status"] = "Completed" if all_successful else "Partially Failed"
+    rule_record["results"] = ", ".join([f"{r['action']}: {'✅' if r['success'] else '❌'}" for r in action_results])
+    
+    # Ajouter à l'historique
+    if not hasattr(st.session_state, 'rules_history'):
+        st.session_state.rules_history = []
+    
+    st.session_state.rules_history.append(rule_record)
+    
+    return all_successful, rule_record
+
+# Ajoutez cette fonction pour le mode d'analyse automatique des règles
+def analyze_rules_automatically(malops_data, session, automatic_rules=None):
+    """Analyse les malops et applique les règles automatiquement"""
+    if not automatic_rules:
+        automatic_rules = define_decision_rules()
+    
+    results = []
+    
+    if not malops_data or "data" not in malops_data or not malops_data["data"].get("data"):
+        return results
+    
+    malops = malops_data["data"]["data"]
+    
+    for malop in malops:
+        # Vérifier si le malop correspond à des règles
+        for rule in automatic_rules:
+            if rule["conditions"](malop):
+                # Pour chaque machine affectée
+                for machine in malop.get("machines", []):
+                    # Vérifier les conditions de la machine si elles existent
+                    machine_condition_met = True
+                    if "machine_conditions" in rule:
+                        machine_condition_met = rule["machine_conditions"](machine)
+                    
+                    if machine_condition_met:
+                        success, record = execute_rule_automatically(rule, malop, machine, session)
+                        results.append(record)
+                        
+                        # Envoyer une notification par email pour chaque règle exécutée
+                        email_message = f"""
+                        Alerte EDR - Réponse automatisée
+                        
+                        Une règle de réponse automatisée a été déclenchée:
+                        - Règle: {rule['name']}
+                        - Description: {rule['description']}
+                        - Actions: {', '.join(rule['actions'])}
+                        - Machine: {machine.get('displayName', 'Unknown')}
+                        - Malop: {malop.get('displayName', 'Unknown')}
+                        - Date/heure: {datetime.now().strftime('%d/%m/%Y à %H:%M:%S')}
+                        - Résultat: {'Succès' if success else 'Échec partiel'}
+                        
+                        Connectez-vous à l'application EDR Chatbot Automation pour plus de détails.
+                        """
+                        send_alert(email_message)
+    
+    return results
 
 # Interface Streamlit principale
 st.image("logo/2.png", width=100)
 st.title("EDR Chatbot Automation")
 
 # Navigation par onglets - 4 onglets (après fusion)
-tab1, tab2, tab3, tab4 = st.tabs([
+tab1, tab2, tab3, tab4, tab5 = st.tabs([
     "Machine Analysis",
     "Vulnerability Management",  
     "Retrieve Malops", 
-    "Remediation & Response"
+    "Remediation & Response",
+    "Auto Response"
 ])
 
 # Onglet 1: Analyse des machines  
@@ -522,6 +721,7 @@ with tab2:
     st.info("Feature under development")
 
 # Onglet 3: Retrieve Malops
+# Onglet 3: Retrieve Malops - Implémentation modifiée
 with tab3:
     st.header("Malops Dashboard")
     
@@ -532,8 +732,8 @@ with tab3:
     with col1:
         severity_filter = st.multiselect(
             "Filter by severity",
-            [ "High", "Medium", "Low"],
-            default=["Low","Medium",  "High"]
+            ["High", "Medium", "Low"],
+            default=["Low", "Medium", "High"]
         )
     
     with col2:
@@ -554,9 +754,14 @@ with tab3:
     if st.button("Retrieve and analyze Malops"):
         with st.spinner("Retrieving and analyzing Malops..."):
             try:
-                # Récupérer les données des Malops
+                # Récupérer les données des Malops avec les filtres sélectionnés
                 config = load_config()
-                malops_data, session = get_malops(config)
+                malops_data, session = get_malops(
+                    config, 
+                    severity_filter=severity_filter, 
+                    status_filter=status_filter, 
+                    priority_filter=priority_filter
+                )
                 
                 if malops_data:
                     # Analyser les données
@@ -584,185 +789,256 @@ with tab3:
             st.session_state.malops_data,
             st.session_state.malops_analysis
         )
+
+
+# Tab 4: Remediation & Response
 # Tab 4: Remediation & Response
 with tab4:
     st.header("Remediation & Response")
     
     if hasattr(st.session_state, 'malops_data') and st.session_state.malops_data:
-        # Create two sections with expanders to organize content
-        with st.expander("Malop Selection and Information", expanded=True):
-            # Display available Malops for remediation
-            malops = st.session_state.malops_data["data"]["data"]
-            malops_options = {f"{m.get('displayName', 'Unknown')} ({m.get('guid', 'N/A')})": m.get('guid', 'N/A') for m in malops}
-            
-            selected_malop = st.selectbox(
-                "Select a Malop for remediation",
-                list(malops_options.keys())
-            )
-            
-            if selected_malop:
-                malop_id = malops_options[selected_malop]
-                
-                # Retrieve details of the selected Malop
-                selected_malop_data = next((m for m in malops if m.get('guid') == malop_id), None)
-                
-                if selected_malop_data:
-                    # Display Malop information
-                    col1, col2, col3 = st.columns(3)
-                    
-                    with col1:
-                        st.write(f"**Detection type:** {selected_malop_data.get('detectionType', 'Unknown')}")
-                        st.write(f"**Severity:** {selected_malop_data.get('severity', 'Unknown')}")
-                    
-                    with col2:
-                        st.write(f"**Priority:** {selected_malop_data.get('priority', 'Unknown')}")
-                        st.write(f"**Status:** {selected_malop_data.get('status', 'Unknown')}")
-                    
-                    with col3:
-                        creation_time = selected_malop_data.get('creationTime', 0)
-                        if creation_time:
-                            st.write(f"**Creation date:** {datetime.fromtimestamp(creation_time/1000).strftime('%Y-%m-%d %H:%M')}")
-                    
-                    # List affected machines
-                    machines = selected_malop_data.get('machines', [])
-                    if machines:
-                        st.subheader("Affected machines:")
-                        
-                        # Added a selection column for machines
-                        selected_machine = None
-                        if len(machines) > 0:
-                            machine_options = {m.get('displayName', 'Unknown'): m for m in machines}
-                            selected_machine_name = st.selectbox("Select machine for remediation", list(machine_options.keys()))
-                            selected_machine = machine_options[selected_machine_name]
-                        
-                        machine_data = []
-                        for machine in machines:
-                            is_selected = selected_machine and machine.get('displayName') == selected_machine.get('displayName')
-                            machine_data.append({
-                                "Name": machine.get('displayName', 'Unknown'),
-                                "Status": "🟢 Online" if machine.get('connected') else "🔴 Offline",
-                                "Isolation": "🔒 Isolated" if machine.get('isolated') else "🔓 Not isolated",
-                                "OS": machine.get('osType', 'Unknown'),
-                                "Selected": "✅" if is_selected else ""
-                            })
-                        
-                        st.dataframe(pd.DataFrame(machine_data))
-                        
-                        # Store the selected machine in session state for remediation
-                        if selected_machine:
-                            st.session_state.selected_machine = selected_machine
-                    
-                    # Display MITRE ATT&CK information if available
-                    col1, col2 = st.columns(2)
-                    
-                    with col1:
-                        mitre_tactics = selected_malop_data.get('mitreTactics', [])
-                        if mitre_tactics:
-                            st.subheader("MITRE ATT&CK Tactics:")
-                            for tactic in mitre_tactics:
-                                st.write(f"- {tactic}")
-                    
-                    with col2:
-                        mitre_techniques = selected_malop_data.get('mitreTechniques', [])
-                        if mitre_techniques:
-                            st.subheader("MITRE ATT&CK Techniques:")
-                            for technique in mitre_techniques:
-                                st.write(f"- {technique}")
+        # SECTION 1: Malop Selection and Information
+        st.subheader("1. Malop Selection and Information")
         
-        # Section for remediation actions
-        with st.expander("Remediation Actions", expanded=True):
-            st.subheader("Response Configuration")
+        # Display available Malops for remediation
+        malops = st.session_state.malops_data["data"]["data"]
+        malops_options = {f"{m.get('displayName', 'Unknown')} ({m.get('guid', 'N/A')})": m.get('guid', 'N/A') for m in malops}
+        
+        selected_malop = st.selectbox(
+            "Select a Malop for remediation",
+            list(malops_options.keys())
+        )
+        
+        if selected_malop:
+            malop_id = malops_options[selected_malop]
             
-            # Check if we have a selected machine
-            if hasattr(st.session_state, 'selected_machine') and st.session_state.selected_machine:
-                machine = st.session_state.selected_machine
-                machine_id = machine.get('guid', '')
-                machine_name = machine.get('displayName', 'Unknown')
+            # Retrieve details of the selected Malop
+            selected_malop_data = next((m for m in malops if m.get('guid') == malop_id), None)
+            
+            if selected_malop_data:
+                # Display Malop information
+                col1, col2, col3 = st.columns(3)
                 
-                # Show machine isolation status and controls
-                is_isolated = machine.get('isolated', False)
-                isolation_status = "🔒 Isolated" if is_isolated else "🔓 Not isolated"
-                
-                st.write(f"**Machine:** {machine_name}")
-                st.write(f"**Isolation status:** {isolation_status}")
-                
-                # Isolation controls
-                col1, col2 = st.columns(2)
                 with col1:
-                    if not is_isolated and st.button("Isolate Machine"):
-                        with st.spinner("Isolating machine..."):
-                            success, response = isolate_machine(
-                                st.session_state.session, 
-                                machine_id, 
-                                malop_id
-                            )
-                            if success:
-                                st.success(f"Machine {machine_name} isolated successfully!")
-                                # Update the machine's isolation status
-                                st.session_state.selected_machine['isolated'] = True
-                                st.rerun()
-                            else:
-                                st.error(f"Failed to isolate machine: {machine_name}")
+                    st.write(f"**Detection type:** {selected_malop_data.get('detectionType', 'Unknown')}")
+                    st.write(f"**Severity:** {selected_malop_data.get('severity', 'Unknown')}")
                 
                 with col2:
-                    if is_isolated and st.button("Un-isolate Machine"):
-                        with st.spinner("Un-isolating machine..."):
-                            success, response = unisolate_machine(
-                                st.session_state.session, 
-                                machine_id, 
-                                malop_id
-                            )
-                            if success:
-                                st.success(f"Machine {machine_name} un-isolated successfully!")
-                                # Update the machine's isolation status
-                                st.session_state.selected_machine['isolated'] = False
-                                st.rerun()
-                            else:
-                                st.error(f"Failed to un-isolate machine: {machine_name}")
+                    st.write(f"**Priority:** {selected_malop_data.get('priority', 'Unknown')}")
+                    st.write(f"**Status:** {selected_malop_data.get('status', 'Unknown')}")
                 
-                # Remediation action selection
-                st.subheader("Remediation Actions")
+                with col3:
+                    creation_time = selected_malop_data.get('creationTime', 0)
+                    if creation_time:
+                        st.write(f"**Creation date:** {datetime.fromtimestamp(creation_time/1000).strftime('%Y-%m-%d %H:%M')}")
                 
-                # Response options
-                response_type = st.radio(
-                    "Response type",
-                    ["Standard response", "Custom response"]
+                # List affected machines
+                machines = selected_malop_data.get('machines', [])
+                if machines:
+                    st.subheader("Affected machines:")
+                    
+                    # Added a selection column for machines
+                    selected_machine = None
+                    if len(machines) > 0:
+                        machine_options = {m.get('displayName', 'Unknown'): m for m in machines}
+                        selected_machine_name = st.selectbox("Select machine for remediation", list(machine_options.keys()))
+                        selected_machine = machine_options[selected_machine_name]
+                    
+                    machine_data = []
+                    for machine in machines:
+                        is_selected = selected_machine and machine.get('displayName') == selected_machine.get('displayName')
+                        machine_data.append({
+                            "Name": machine.get('displayName', 'Unknown'),
+                            "Status": "🟢 Online" if machine.get('connected') else "🔴 Offline",
+                            "Isolation": "🔒 Isolated" if machine.get('isolated') else "🔓 Not isolated",
+                            "OS": machine.get('osType', 'Unknown'),
+                            "Selected": "✅" if is_selected else ""
+                        })
+                    
+                    st.dataframe(pd.DataFrame(machine_data))
+                    
+                    # Store the selected machine in session state for remediation
+                    if selected_machine:
+                        st.session_state.selected_machine = selected_machine
+                
+                # Display MITRE ATT&CK information if available
+                col1, col2 = st.columns(2)
+                
+                with col1:
+                    mitre_tactics = selected_malop_data.get('mitreTactics', [])
+                    if mitre_tactics:
+                        st.subheader("MITRE ATT&CK Tactics:")
+                        for tactic in mitre_tactics:
+                            st.write(f"- {tactic}")
+                
+                with col2:
+                    mitre_techniques = selected_malop_data.get('mitreTechniques', [])
+                    if mitre_techniques:
+                        st.subheader("MITRE ATT&CK Techniques:")
+                        for technique in mitre_techniques:
+                            st.write(f"- {technique}")
+        
+
+        
+        
+        
+        st.markdown("---")
+        
+        # SECTION 3: Complete List of Rules
+        st.subheader("3. Liste complète des règles")
+        
+        # Display all available rules
+        rules = define_decision_rules()
+        for i, rule in enumerate(rules):
+            st.write(f"**Règle {i+1}:** {rule['name']}")
+            st.write(f"Description: {rule['description']}")
+            st.write(f"Actions: {', '.join(rule['actions'])}")
+            st.write("---")
+        
+        st.markdown("---")
+        
+        # Remediation Actions section
+        st.subheader("Remediation Actions")
+        
+        # Check if we have a selected machine
+        if hasattr(st.session_state, 'selected_machine') and st.session_state.selected_machine:
+            machine = st.session_state.selected_machine
+            machine_id = machine.get('guid', '')
+            machine_name = machine.get('displayName', 'Unknown')
+            
+            # Show machine isolation status and controls
+            is_isolated = machine.get('isolated', False)
+            isolation_status = "🔒 Isolated" if is_isolated else "🔓 Not isolated"
+            
+            st.write(f"**Machine:** {machine_name}")
+            st.write(f"**Isolation status:** {isolation_status}")
+            
+            # Isolation controls
+            col1, col2 = st.columns(2)
+            with col1:
+                if not is_isolated and st.button("Isolate Machine"):
+                    with st.spinner("Isolating machine..."):
+                        success, response = isolate_machine(
+                            st.session_state.session, 
+                            machine_id, 
+                            malop_id
+                        )
+                        if success:
+                            st.success(f"Machine {machine_name} isolated successfully!")
+                            # Update the machine's isolation status
+                            st.session_state.selected_machine['isolated'] = True
+                            st.rerun()
+                        else:
+                            st.error(f"Failed to isolate machine: {machine_name}")
+            
+            with col2:
+                if is_isolated and st.button("Un-isolate Machine"):
+                    with st.spinner("Un-isolating machine..."):
+                        success, response = unisolate_machine(
+                            st.session_state.session, 
+                            machine_id, 
+                            malop_id
+                        )
+                        if success:
+                            st.success(f"Machine {machine_name} un-isolated successfully!")
+                            # Update the machine's isolation status
+                            st.session_state.selected_machine['isolated'] = False
+                            st.rerun()
+                        else:
+                            st.error(f"Failed to un-isolate machine: {machine_name}")
+            
+            # Remediation action selection
+            st.subheader("Remediation Actions")
+            
+            # Response options
+            response_type = st.radio(
+                "Response type",
+                ["Standard response", "Custom response"]
+            )
+            
+            if response_type == "Standard response":
+                st.info("Standard response includes terminating malicious processes and quarantining suspicious files.")
+                
+                if st.button("Run Standard Response"):
+                    with st.spinner("Executing standard response..."):
+                        # Execute kill processes action (standard)
+                        success1, response1 = perform_remediation_action(
+                            st.session_state.session,
+                            "KILL_PROCESS",
+                            "malicious_process",
+                            f"auto-kill-{int(time.time())}",
+                            machine_name,
+                            machine_id
+                        )
+                        
+                        # Execute quarantine files action (standard)
+                        success2, response2 = perform_remediation_action(
+                            st.session_state.session,
+                            "QUARANTINE_FILE",
+                            "suspicious_file",
+                            f"auto-quarantine-{int(time.time())}",
+                            machine_name,
+                            machine_id
+                        )
+                        
+                        if success1 and success2:
+                            st.success("Standard response executed successfully!")
+                            
+                            # Record the action
+                            action_record = {
+                                "malop_id": malop_id,
+                                "malop_name": selected_malop,
+                                "machine": machine_name,
+                                "action_type": "Standard Response (KILL_PROCESS, QUARANTINE_FILE)",
+                                "executed_at": datetime.now().strftime('%d/%m/%Y at %H:%M:%S'),
+                                "status": "Completed"
+                            }
+                            
+                            # Store action history
+                            if not hasattr(st.session_state, 'remediation_history'):
+                                st.session_state.remediation_history = []
+                            
+                            st.session_state.remediation_history.append(action_record)
+                        else:
+                            st.error("Failed to execute standard response")
+            else:
+                # Custom response options with action descriptions
+                st.info("Configure your custom response below.")
+                
+                # Remediation type selection
+                remediation_type = st.radio(
+                    "Select remediation action type:",
+                    ["QUARANTINE_FILE", "KILL_PROCESS", "DELETE_REGISTRY_KEY", "BLOCK_FILE"],
+                    horizontal=True
                 )
                 
-                if response_type == "Standard response":
-                    st.info("Standard response includes terminating malicious processes and quarantining suspicious files.")
-                    
-                    if st.button("Run Standard Response"):
-                        with st.spinner("Executing standard response..."):
-                            # Execute kill processes action (standard)
-                            success1, response1 = perform_remediation_action(
+                # Input fields based on remediation type
+                target_name = st.text_input("Target name (file, process, registry key)")
+                target_id = st.text_input("Target ID (if known)", value=f"auto-generated-{int(time.time())}")
+                
+                # Action execution button
+                if st.button("Execute Remediation Action"):
+                    if target_name:
+                        with st.spinner(f"Executing {remediation_type} action..."):
+                            success, response = perform_remediation_action(
                                 st.session_state.session,
-                                "KILL_PROCESS",
-                                "malicious_process",
-                                f"auto-kill-{int(time.time())}",
+                                remediation_type,
+                                target_name,
+                                target_id,
                                 machine_name,
                                 machine_id
                             )
                             
-                            # Execute quarantine files action (standard)
-                            success2, response2 = perform_remediation_action(
-                                st.session_state.session,
-                                "QUARANTINE_FILE",
-                                "suspicious_file",
-                                f"auto-quarantine-{int(time.time())}",
-                                machine_name,
-                                machine_id
-                            )
-                            
-                            if success1 and success2:
-                                st.success("Standard response executed successfully!")
+                            if success:
+                                st.success(f"Remediation action {remediation_type} executed successfully!")
                                 
                                 # Record the action
                                 action_record = {
                                     "malop_id": malop_id,
                                     "malop_name": selected_malop,
                                     "machine": machine_name,
-                                    "action_type": "Standard Response (KILL_PROCESS, QUARANTINE_FILE)",
+                                    "action_type": remediation_type,
+                                    "target": target_name,
                                     "executed_at": datetime.now().strftime('%d/%m/%Y at %H:%M:%S'),
                                     "status": "Completed"
                                 }
@@ -773,122 +1049,75 @@ with tab4:
                                 
                                 st.session_state.remediation_history.append(action_record)
                             else:
-                                st.error("Failed to execute standard response")
-                else:
-                    # Custom response options with action descriptions
-                    st.info("Configure your custom response below.")
-                    
-                    # Remediation type selection
-                    remediation_type = st.radio(
-                        "Select remediation action type:",
-                        ["QUARANTINE_FILE", "KILL_PROCESS", "DELETE_REGISTRY_KEY", "BLOCK_FILE"],
-                        horizontal=True
-                    )
-                    
-                    # Input fields based on remediation type
-                    target_name = st.text_input("Target name (file, process, registry key)")
-                    target_id = st.text_input("Target ID (if known)", value=f"auto-generated-{int(time.time())}")
-                    
-                    # Action execution button
-                    if st.button("Execute Remediation Action"):
-                        if target_name:
-                            with st.spinner(f"Executing {remediation_type} action..."):
-                                success, response = perform_remediation_action(
-                                    st.session_state.session,
-                                    remediation_type,
-                                    target_name,
-                                    target_id,
-                                    machine_name,
-                                    machine_id
-                                )
-                                
-                                if success:
-                                    st.success(f"Remediation action {remediation_type} executed successfully!")
-                                    
-                                    # Record the action
-                                    action_record = {
-                                        "malop_id": malop_id,
-                                        "malop_name": selected_malop,
-                                        "machine": machine_name,
-                                        "action_type": remediation_type,
-                                        "target": target_name,
-                                        "executed_at": datetime.now().strftime('%d/%m/%Y at %H:%M:%S'),
-                                        "status": "Completed"
-                                    }
-                                    
-                                    # Store action history
-                                    if not hasattr(st.session_state, 'remediation_history'):
-                                        st.session_state.remediation_history = []
-                                    
-                                    st.session_state.remediation_history.append(action_record)
-                                else:
-                                    st.error(f"Failed to execute remediation action: {remediation_type}")
-                        else:
-                            st.warning("Please enter a target name before executing the action")
-            else:
-                st.warning("Please select a machine from the list above to perform remediation actions")
+                                st.error(f"Failed to execute remediation action: {remediation_type}")
+                    else:
+                        st.warning("Please enter a target name before executing the action")
+        else:
+            st.warning("Please select a machine from the list above to perform remediation actions")
+        
+        # Scheduling options
+        st.subheader("Scheduling")
+        
+        schedule_option = st.radio(
+            "When to execute",
+            ["Immediately", "Schedule for later"]
+        )
+        
+        if schedule_option == "Schedule for later":
+            col1, col2 = st.columns(2)
+            with col1:
+                scheduled_date = st.date_input("Date", datetime.now().date())
+            with col2:
+                scheduled_time = st.time_input("Time", datetime.now().time())
             
-            # Scheduling options
-            st.subheader("Scheduling")
-            
-            schedule_option = st.radio(
-                "When to execute",
-                ["Immediately", "Schedule for later"]
-            )
-            
-            if schedule_option == "Schedule for later":
-                col1, col2 = st.columns(2)
-                with col1:
-                    scheduled_date = st.date_input("Date", datetime.now().date())
-                with col2:
-                    scheduled_time = st.time_input("Time", datetime.now().time())
-                
-                # Combine date and time
-                scheduled_datetime = datetime.combine(scheduled_date, scheduled_time)
-                st.info(f"The response will be executed on {scheduled_datetime.strftime('%d/%m/%Y at %H:%M')}")
-            
-            # Remediation notes
-            st.subheader("Remediation Notes")
-            remediation_notes = st.text_area("Add notes or comments about this remediation", height=100)
+            # Combine date and time
+            scheduled_datetime = datetime.combine(scheduled_date, scheduled_time)
+            st.info(f"The response will be executed on {scheduled_datetime.strftime('%d/%m/%Y at %H:%M')}")
+        
+        # Remediation notes
+        st.subheader("Remediation Notes")
+        remediation_notes = st.text_area("Add notes or comments about this remediation", height=100)
         
         # Remediation history
-        with st.expander("Remediation History", expanded=False):
-            if hasattr(st.session_state, 'remediation_history') and st.session_state.remediation_history:
-                # Convert history to DataFrame for tabular display
-                history_data = []
-                for record in st.session_state.remediation_history:
-                    history_data.append({
-                        "Malop": record.get("malop_name", "").split(" (")[0],
-                        "Machine": record.get("machine", "N/A"),
-                        "Action Type": record.get("action_type", "N/A"),
-                        "Target": record.get("target", "N/A"),
-                        "Executed at": record.get("executed_at", ""),
-                        "Status": record.get("status", "")
-                    })
+        st.markdown("---")
+        st.subheader("Remediation History")
+        
+        if hasattr(st.session_state, 'remediation_history') and st.session_state.remediation_history:
+            # Convert history to DataFrame for tabular display
+            history_data = []
+            for record in st.session_state.remediation_history:
+                history_data.append({
+                    "Malop": record.get("malop_name", "").split(" (")[0],
+                    "Machine": record.get("machine", "N/A"),
+                    "Action Type": record.get("action_type", "N/A"),
+                    "Target": record.get("target", "N/A"),
+                    "Executed at": record.get("executed_at", ""),
+                    "Status": record.get("status", "")
+                })
+            
+            history_df = pd.DataFrame(history_data)
+            st.dataframe(history_df, use_container_width=True)
+            
+            # Option to export history
+            if st.button("Export remediation history"):
+                export_path = "reports/remediation_history.csv"
+                os.makedirs(os.path.dirname(export_path), exist_ok=True)
+                history_df.to_csv(export_path, index=False)
+                st.success(f"History exported successfully to {export_path}")
+            
+            # Option to generate incident report
+            if st.button("Generate incident report"):
+                st.info("Generating incident report...")
                 
-                history_df = pd.DataFrame(history_data)
-                st.dataframe(history_df, use_container_width=True)
+                # Create a directory for reports if it doesn't exist
+                os.makedirs("reports/incidents", exist_ok=True)
                 
-                # Option to export history
-                if st.button("Export remediation history"):
-                    export_path = "reports/remediation_history.csv"
-                    os.makedirs(os.path.dirname(export_path), exist_ok=True)
-                    history_df.to_csv(export_path, index=False)
-                    st.success(f"History exported successfully to {export_path}")
+                # Report filename
+                report_filename = f"incident_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt"
+                report_path = f"reports/incidents/{report_filename}"
                 
-                # Option to generate incident report
-                if st.button("Generate incident report"):
-                    st.info("Generating incident report...")
-                    
-                    # Create a directory for reports if it doesn't exist
-                    os.makedirs("reports/incidents", exist_ok=True)
-                    
-                    # Report filename
-                    report_filename = f"incident_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt"
-                    report_path = f"reports/incidents/{report_filename}"
-                    
-                    # Report content
-                    report_content = f"""
+                # Report content
+                report_content = f"""
 SECURITY INCIDENT REPORT
 ==============================
 Report date: {datetime.now().strftime('%d/%m/%Y at %H:%M:%S')}
@@ -902,19 +1131,40 @@ NOTES
 {remediation_notes}
 
 This report was automatically generated by EDR Chatbot Automation.
-                    """
-                    
-                    # Write the report to a file
-                    with open(report_path, "w") as f:
-                        f.write(report_content)
-                    
-                    st.success(f"Incident report generated successfully: {report_path}")
-                    
-                    # Display report content
-                    with st.expander("View report content"):
-                        st.text(report_content)
-            else:
-                st.info("No remediation history available.")
+                """
+                
+                # Write the report to a file
+                with open(report_path, "w") as f:
+                    f.write(report_content)
+                
+                st.success(f"Incident report generated successfully: {report_path}")
+                
+                # Display report content
+                st.expander("View report content").text(report_content)
+        else:
+            st.info("No remediation history available.")
+        
+        # Decision Rules History section
+        st.markdown("---")
+        st.subheader("Decision Rules History")
+        
+        # Initialiser l'historique des règles si ce n'est pas déjà fait
+        if not hasattr(st.session_state, 'rules_history'):
+            st.session_state.rules_history = []
+        
+        # Afficher l'historique s'il existe
+        if st.session_state.rules_history:
+            rules_history_df = pd.DataFrame(st.session_state.rules_history)
+            st.dataframe(rules_history_df, use_container_width=True)
+            
+            # Option pour exporter l'historique
+            if st.button("Exporter l'historique des règles"):
+                export_path = "reports/rules_history.csv"
+                os.makedirs(os.path.dirname(export_path), exist_ok=True)
+                rules_history_df.to_csv(export_path, index=False)
+                st.success(f"Historique exporté avec succès vers {export_path}")
+        else:
+            st.info("Aucun historique de décision automatisée disponible.")
     else:
         # If no Malop has been retrieved, display a message
         st.warning("Please first retrieve Malops in the 'Retrieve Malops' tab.")
@@ -923,6 +1173,50 @@ This report was automatically generated by EDR Chatbot Automation.
         if st.button("Go to Retrieve Malops tab"):
             st.session_state.active_tab = "Retrieve Malops"
             st.rerun()
+
+# Et ajoutez le code suivant pour le nouvel onglet:
+# Onglet 5 : Auto Response
+with tab5:
+    st.header("Automated Response (NIST/SANS)")
+
+    if "session" not in st.session_state or "malops_data" not in st.session_state:
+        st.warning("⚠️ Session ou Malops non initialisés. Veuillez d'abord utiliser l'onglet 'Retrieve Malops'.")
+        st.stop()
+
+    # Affichage des règles activées
+    st.subheader("📋 Règles actives pour la réponse automatisée")
+    rules = st.session_state.get("rules", [])  # On suppose que les règles sont définies ailleurs dans l'app
+
+    active_rules = []
+    for i, rule in enumerate(rules):
+        key = f"rule_{i}_active"
+        if st.session_state.get(key, False):
+            active_rules.append(rule)
+            st.markdown(f"✅ **{rule['name']}** — _{rule['description']}_")
+
+    if not active_rules:
+        st.info("Aucune règle active. Activez des règles dans l'onglet 'Remediation & Response' pour activer le mode auto.")
+        st.stop()
+
+    st.info("⏱️ Analyse automatique des Malops toutes les 5 minutes. Cette page se rafraîchit automatiquement.")
+
+    # Appliquer l’analyse automatique des règles
+    st.subheader("🧠 Application automatique des règles")
+    with st.spinner("Exécution en cours..."):
+        results = analyze_rules_automatically(
+            st.session_state.malops_data,
+            st.session_state.session,
+            active_rules
+        )
+        if results:
+            for res in results:
+                st.success(f"[{res['machine']}] → {res['malop']} : {res['actions']}")
+        else:
+            st.info("✅ Aucune menace nécessitant une action immédiate.")
+
+    # Rafraîchissement automatique toutes les 5 minutes
+    time.sleep(300)
+    st.experimental_rerun()
 
 # Ajouter un pied de page
 st.markdown("---")
