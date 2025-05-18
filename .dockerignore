@@ -1,0 +1,54 @@
+# Ignore Git files
+.git
+.gitignore
+
+# Ignore Python cache files
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Ignore reports and test coverage
+htmlcov/
+.tox/
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+.hypothesis/
+test-results.xml
+
+# Ignore Jenkins and SonarQube related
+reports/
+.scannerwork/
+pylint-report.txt
+
+# Ignore environment files
+.env
+.venv
+venv/
+ENV/
+
+# Ignore IDE related
+.idea/
+.vscode/
+*.swp
+*.swo
